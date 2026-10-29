@@ -1,0 +1,6 @@
+/ffmpeg/*
+!/ffmpeg/setup-ffmpeg.sh
+/resnet/*
+!/resnet/get-resnet.sh
+/nanopi/.venv-resnet/
+/pc-wsl/.venv-resnet/
