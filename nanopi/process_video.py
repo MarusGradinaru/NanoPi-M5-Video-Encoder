@@ -977,8 +977,8 @@ def main() -> int:
     classification_group.add_argument(
         "--threshold",
         type=float,
-        default=0.65,
-        help="Target-class probability threshold from 0 to 1 (default: 0.65).",
+        default=0.75,
+        help="Target-class probability threshold from 0 to 1 (default: 0.75).",
     )
     classification_group.add_argument(
         "--candidate-threshold",

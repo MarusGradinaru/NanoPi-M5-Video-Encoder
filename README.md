@@ -129,7 +129,7 @@ By default, the script creates a working directory named after the input video, 
 
 The working directory contains the extracted scene images, a `scenes_validated/` folder for scenes accepted by the classifier, a `scenes_to_review/` folder for borderline candidates, an Excel report named `scene_predictions.xlsx`, and batch/bash helper scripts to delete the associated video source file and its symlink.
 
-The default target probability threshold is `0.65`. With `--candidate-threshold 0.4`, scenes with lower confidence that fall into the review range are kept in `scenes_to_review/` rather than automatically selected. Inspect `scene_predictions.xlsx` and the review images. If a candidate should be included, move its image into `scenes_validated/` before encoding. Only scenes in `scenes_validated/` are used by the encoder.
+The default target probability threshold is `0.75`. With `--candidate-threshold 0.4`, scenes with lower confidence that fall into the review range are kept in `scenes_to_review/` rather than automatically selected. Inspect `scene_predictions.xlsx` and the review images. If a candidate should be included, move its image into `scenes_validated/` before encoding. Only scenes in `scenes_validated/` are used by the encoder.
 
 ### 6. Encode the selected scenes
 
