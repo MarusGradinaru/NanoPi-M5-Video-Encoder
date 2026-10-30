@@ -51,6 +51,55 @@ class ScriptError(Exception):
     """An expected operational error suitable for a concise CLI message."""
 
 
+def create_remux_helper(encoded_dir: Path) -> None:
+    """Create the Windows remux launcher if it does not already exist."""
+    remux_bat_path = encoded_dir / "remux.bat"
+
+    if remux_bat_path.exists(): return
+
+    processing_dir = encoded_dir.parent.resolve()
+    script_path = Path(__file__).resolve()
+    script_dir = script_path.parent
+    venv_python = script_dir / ".venv-resnet" / "bin" / "python"
+
+    def shell_quote(value: str) -> str:
+        return "'" + value.replace("'", "'\\''") + "'"
+
+    remote_command = (
+        f"cd {shell_quote(str(script_dir))} && "
+        f"if [ ! -x {shell_quote(str(venv_python))} ]; then "
+        "echo 'Error: .venv-resnet Python interpreter not found.'; "
+        "exit 1; fi && "
+        f"{shell_quote(str(venv_python))} "
+        f"{shell_quote(str(script_path))} "
+        f"{shell_quote(str(processing_dir))} --just-mux"
+    )
+
+    remux_bat_content = (
+        f'@ssh -tt rkvenc-nanopi "{remote_command}" & pause\n'
+    ).replace("\n", "\r\n").encode("utf-8")
+
+    try:
+        with remux_bat_path.open("xb") as file:
+            file.write(remux_bat_content)
+    except FileExistsError:
+        return
+    except OSError as exc:
+        raise ScriptError(
+            f"Could not create Windows remux launcher '{remux_bat_path}': {exc}"
+        ) from exc
+
+    try:
+        remux_bat_path.chmod(0o775)
+    except OSError as exc:
+        remux_bat_path.unlink(missing_ok=True)
+        raise ScriptError(
+            f"Could not configure Windows remux launcher '{remux_bat_path}': {exc}"
+        ) from exc
+
+    print("Created the helper for quick remux in Windows.\n")
+
+
 def format_runtime(started: float) -> str:
     elapsed = max(0, int(time.monotonic() - started))
     return f"{elapsed // 3600:02d}:{(elapsed % 3600) // 60:02d}:{elapsed % 60:02d}"
@@ -925,6 +974,8 @@ def main() -> int:
                 )
             print(f" - custom offset: {offset_value} ({offset_scope})")
         print(f" - output folder: {processing_dir}\n")
+
+        create_remux_helper(output_dir)
 
         encoded_count = 0
         skipped_count = 0

@@ -300,7 +300,7 @@ def create_project_artifacts(output_dir: Path, input_file: Path) -> None:
     # The path is fixed in this project's BAT so the launcher can be run from Total Commander.
     remote_script_path = str(delete_sh_path.resolve())
     remote_script_argument = shell_single_quote(remote_script_path)
-    delete_bat_content = f'@ssh -tt nanopi-encoder "bash {remote_script_argument}" & pause\n'
+    delete_bat_content = f'@ssh -tt rkvenc-nas "bash {remote_script_argument}" & pause\n'
     try:
         # Use Windows CRLF line endings for cmd.exe and the requested executable/group mode.
         delete_bat_path.write_bytes(delete_bat_content.replace("\n", "\r\n").encode("utf-8"))

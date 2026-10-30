@@ -46,7 +46,7 @@ You only need the PC/WSL workflow when exporting or updating the RKNN feature-ex
 | `pc-wsl/` | Optional PC/WSL workflow that exports the Keras ResNet50V2 model to ONNX and converts it to RKNN for the RK3576. |
 | `resnet/` | Shared location for the model files, dataset, and temporary build/validation artifacts. These files are downloaded or generated locally and are not stored in Git. |
 | `ffmpeg/` | `setup-ffmpeg.sh`, which builds and installs the Rockchip-enabled MPP, RGA, and FFmpeg stack. Downloaded sources and build files are ignored by Git. |
-| `windows/` | Optional Windows helper for configuring the `nanopi-encoder` SSH alias used by the source-file cleanup workflow. |
+| `windows/` | Optional Windows helper for configuring the SSH aliases used by the source-file cleanup workflow and remux. |
 
 The repository's `.gitignore` intentionally excludes generated build files, virtual environments, datasets, model binaries, and artifacts. Only the scripts/configuration needed to reproduce the workflow belong in Git.
 
