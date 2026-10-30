@@ -7,7 +7,7 @@ set -o pipefail
 # Configuration  (change this according to your needs)
 # -----------------------------------------------------------------------------
 TARGET_CLASS="andreea-esca"
-PROJECT_DIR="/mnt/NAS/WDRed2/TV Rec/Pisde/Andreea Esca"
+PROJECT_DIR="/NAS/WDRed2/TV Rec/Pisde/Andreea Esca"
 CANDIDATE_THRESHOLD="0.4"
 ENCODER_QP="20"
 ENCODER_TIER="high"
