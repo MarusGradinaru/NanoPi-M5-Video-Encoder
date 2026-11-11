@@ -1,0 +1,13 @@
+/ffmpeg/*
+!/ffmpeg/setup-ffmpeg.sh
+/resnet/*
+!/resnet/get-resnet.sh
+/pc-wsl/.venv-resnet/
+/nanopi/.venv-resnet/
+/nanopi/__pycache__/
+/nanopi/native/
+/nanopi/resnet_engine/lib/
+/nanopi/resnet_engine/librknn_api/
+/nanopi/resnet_engine/python/
+/nanopi/resnet_engine/resnet-engine-benchmark
+/nanopi/resnet_engine/rkmpp-jpeg-decode
