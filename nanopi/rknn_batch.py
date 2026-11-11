@@ -46,28 +46,10 @@ def model_filename_for_batch(batch_size: int) -> str:
 def resolve_feature_model_path(
     models_dir: Path,
     explicit_path: Path | None = None,
+    batch_size: int = 4,
 ) -> Path:
-    """Use an explicit model when provided; otherwise select the highest installed batch."""
+    """Use an explicit model, or resolve the model matching the requested batch size."""
     if explicit_path is not None:
         return explicit_path.expanduser().resolve()
 
-    base_path = models_dir / f"{MODEL_STEM}.rknn"
-    candidates: list[tuple[int, Path]] = []
-    if base_path.is_file():
-        candidates.append((1, base_path))
-
-    for path in models_dir.glob(f"{MODEL_STEM}_batch*.rknn"):
-        if not path.is_file():
-            continue
-        try:
-            candidates.append((batch_size_from_model_path(path), path))
-        except ValueError:
-            # Ignore malformed variant names; an explicitly selected malformed path
-            # still produces a clear error through batch_size_from_model_path().
-            continue
-
-    if candidates:
-        # The highest-batch installed variant is the normal default.
-        # Users can select another installed variant explicitly with --extractor.
-        return max(candidates, key=lambda item: (item[0], item[1].name))[1].resolve()
-    return base_path.resolve()
+    return (models_dir / model_filename_for_batch(batch_size)).resolve()

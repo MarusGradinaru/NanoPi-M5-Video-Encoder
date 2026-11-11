@@ -19,7 +19,11 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from rknn_batch import batch_size_from_model_path, model_filename_for_batch, validate_batch_size
+from rknn_batch import (
+    batch_size_from_model_path,
+    resolve_feature_model_path,
+    validate_batch_size,
+)
 
 
 DATASET_DIR = Path("../resnet/dataset")
@@ -497,13 +501,21 @@ def main(argv: list[str] | None = None) -> int:
         "--batch-size",
         type=int,
         default=DEFAULT_RKNN_BATCH_SIZE,
-        help="Fixed batch size of the RKNN feature-extractor model (default: 4; ignored with --use-cpu).",
+        help=(
+            "Fixed batch size used to select the RKNN feature-extractor model (default: 4; "
+            "ignored when --extractor is specified or with --use-cpu)."
+        ),
     )
     parser.add_argument(
         "--extractor",
         type=Path,
         default=None,
-        help="RKNN feature-extractor model path (default: matching batch model in ../resnet/models).",
+        help=(
+            "Explicit RKNN feature-extractor model path. When omitted, the model matching "
+            "--batch-size is selected from ../resnet/models. When specified, the batch size "
+            "is inferred from the filename; a filename without a _batchN suffix means batch 1. "
+            "Ignored with --use-cpu."
+        ),
     )
     args = parser.parse_args(argv)
     backend = "cpu" if args.use_cpu else "rknn"
@@ -511,16 +523,19 @@ def main(argv: list[str] | None = None) -> int:
     feature_model_file: Path | None = None
     if backend == "rknn":
         try:
-            batch_size = validate_batch_size(args.batch_size)
             if args.extractor is not None:
-                feature_model_file = args.extractor.expanduser().resolve()
+                feature_model_file = resolve_feature_model_path(
+                    MODEL_DIR,
+                    explicit_path=args.extractor,
+                )
+                # An explicitly selected model is authoritative. The batch size
+                # encoded in its filename overrides --batch-size.
+                batch_size = batch_size_from_model_path(feature_model_file)
             else:
-                feature_model_file = (MODEL_DIR / model_filename_for_batch(batch_size)).resolve()
-            model_batch_size = batch_size_from_model_path(feature_model_file)
-            if model_batch_size != batch_size:
-                raise ValueError(
-                    f"Selected model has fixed batch size {model_batch_size}, "
-                    f"but --batch-size is {batch_size}: {feature_model_file.name}."
+                batch_size = validate_batch_size(args.batch_size)
+                feature_model_file = resolve_feature_model_path(
+                    MODEL_DIR,
+                    batch_size=batch_size,
                 )
         except ValueError as exc:
             raise SystemExit(f"[Error] {exc}") from exc

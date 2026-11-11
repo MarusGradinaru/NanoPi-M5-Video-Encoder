@@ -20,7 +20,6 @@ from pathlib import Path
 
 from rknn_batch import (
     batch_size_from_model_path,
-    model_filename_for_batch,
     resolve_feature_model_path,
     validate_batch_size,
 )
@@ -526,7 +525,7 @@ def load_multiclass_parameters(model_path: Path):
     except (KeyError, OSError, ValueError) as exc:
         raise RuntimeError(f"Could not load multiclass classifier: {exc}") from exc
 
-    if class_count < 3:
+    if class_count < 2:
         raise RuntimeError("This script requires a multiclass model with at least three classes.")
     if (len(class_names) != class_count or len(set(class_names)) != class_count
             or coef.shape != (class_count, feature_count)
@@ -648,8 +647,8 @@ def classify_images(
         if not feature_model_path.is_file():
             raise RuntimeError(
                 f"RKNN feature model not found: {feature_model_path}\n"
-                "Expected the default batch-4 model or a matching _batchN variant; "
-                "specify --extractor to override it."
+                "Place the model matching the effective batch size in '../resnet/models', "
+                "or specify --extractor to use another model."
             )
         if width != IMAGE_WIDTH or height != IMAGE_HEIGHT:
             raise RuntimeError(
@@ -660,9 +659,8 @@ def classify_images(
         if batch_size_from_model_path(feature_model_path) != batch_size:
             model_batch = batch_size_from_model_path(feature_model_path)
             raise RuntimeError(
-                f"--batch-size is {batch_size}, but the selected RKNN model has fixed batch size "
-                f"{model_batch}: {feature_model_path.name}. Select a matching model with --extractor "
-                "or use the corresponding --batch-size."
+                f"The selected RKNN model has fixed batch size {model_batch}, but the effective "
+                f"inference batch size is {batch_size}: {feature_model_path.name}."
             )
 
         engine_python_dir = Path(__file__).resolve().parent / "resnet_engine" / "python"
@@ -1060,10 +1058,7 @@ def main() -> int:
     total_started = time.perf_counter()
     script_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
-        description=(
-            "Detect scene changes (or reuse existing thumbnails with --skip-scdet), "
-            "classify presenter scenes, and organize them with start/end times."
-        ),
+        description=("Extract video scene cuts and classify presenter scenes using RK3576 NPU or optional CPU."),
         add_help=False,
         formatter_class=lambda prog: argparse.HelpFormatter(prog, width=100),
     )
@@ -1086,11 +1081,12 @@ def main() -> int:
     model_group.add_argument(
         "--extractor",
         type=Path,
-        default=script_dir / ".." / "resnet" / "models" / model_filename_for_batch(BATCH_SIZE),
+        default=None,
         help=(
-            "RKNN feature-extractor model for RK3576 NPU (default: batch-4 model in "
-            "../resnet/models). Its fixed batch size must match --batch-size; "
-            "specify --extractor to select another variant."
+            "Explicit RKNN feature-extractor model for RK3576 NPU. When omitted, "
+            "the model matching --batch-size is selected automatically (default batch: 4). "
+            "If specified, the batch size is inferred from the filename; a filename without "
+            "a _batchN suffix is treated as batch 1. Ignored with --resnet-cpu."
         ),
     )
 
@@ -1168,8 +1164,10 @@ def main() -> int:
         type=int,
         default=BATCH_SIZE,
         help=(
-            "Images per inference batch on CPU and NPU; for NPU, must match the fixed "
-            "batch size of --extractor (default: 4)."
+            "Images per inference batch (default: 4). For RK3576 NPU, selects the matching "
+            "model unless --extractor is specified; then the model filename determines the "
+            "batch size and this option is ignored. With --resnet-cpu, this controls the CPU "
+            "batch size and --extractor is ignored."
         ),
     )
     inference_group.add_argument(
@@ -1220,7 +1218,27 @@ def main() -> int:
 
     classifier_path = args.classifier.expanduser().resolve()
     models_dir = script_dir.parent / "resnet" / "models"
-    extractor_path = resolve_feature_model_path(models_dir, args.extractor)
+    extractor_path: Path | None = None
+
+    if not args.resnet_cpu:
+        try:
+            if args.extractor is not None:
+                extractor_path = resolve_feature_model_path(
+                    models_dir,
+                    explicit_path=args.extractor,
+                )
+                # An explicitly selected model is authoritative. The batch size
+                # encoded in its filename overrides --batch-size.
+                args.batch_size = batch_size_from_model_path(extractor_path)
+            else:
+                args.batch_size = validate_batch_size(args.batch_size)
+                extractor_path = resolve_feature_model_path(
+                    models_dir,
+                    batch_size=args.batch_size,
+                )
+        except ValueError as exc:
+            print(f"[Error] {exc}", file=sys.stderr)
+            return 2
 
     if not args.skip_scdet:
         if input_file is None or not input_file.is_file():
@@ -1235,29 +1253,16 @@ def main() -> int:
     if not classifier_path.is_file():
         print(f"[Error] Classifier model not found: {classifier_path}", file=sys.stderr)
         return 2
-    if not args.resnet_cpu and extractor_path.is_file():
-        try:
-            selected_model_batch_size = batch_size_from_model_path(extractor_path)
-        except ValueError as exc:
-            print(f"[Error] {exc}", file=sys.stderr)
-            return 2
+    if not args.resnet_cpu and extractor_path is not None:
         print(
             f"[Model] Selected RKNN extractor: {extractor_path.name} "
-            f"(batch size {selected_model_batch_size})"
+            f"(batch size {args.batch_size})"
         )
-        if selected_model_batch_size != args.batch_size:
-            print(
-                f"[Error] --batch-size is {args.batch_size}, but the selected model requires "
-                f"batch size {selected_model_batch_size}. Select the matching --extractor "
-                "or change --batch-size.",
-                file=sys.stderr,
-            )
-            return 2
-    if not args.resnet_cpu and not extractor_path.is_file():
+    if not args.resnet_cpu and (extractor_path is None or not extractor_path.is_file()):
         print(
             f"[Error] RKNN feature model not found: {extractor_path}\n"
-            "Place the required RKNN feature-extractor model in '../resnet/models', "
-            "specify --extractor, or use --resnet-cpu.",
+            "Place the required RKNN feature model in '../resnet/models' or specify --extractor. "
+            "Alternatively, use --resnet-cpu.",
             file=sys.stderr,
         )
         return 2
@@ -1272,7 +1277,7 @@ def main() -> int:
         return 2
 
     if args.batch_size < 1 or args.update_size < 1:
-        print("[Error] --batch-size and --update-size must be positive integers.", file=sys.stderr)
+        print("[Error] The effective batch size and --update-size must be positive integers.", file=sys.stderr)
         return 2
     if not args.skip_scdet:
         if not 0.0 <= args.scene_threshold <= 100.0:
@@ -1289,11 +1294,6 @@ def main() -> int:
                 f"the requested width is {args.width}. Use --resnet-cpu for PIL resizing.",
                 file=sys.stderr,
             )
-            return 2
-        try:
-            validate_batch_size(args.batch_size)
-        except ValueError as exc:
-            print(f"[Error] {exc}", file=sys.stderr)
             return 2
 
     if args.skip_scdet:
