@@ -69,7 +69,7 @@ Run 'unset PYENV_VERSION' in this terminal, then rerun this script."
 fi
 
 log "Checking for an installed pyenv Python 3.11 release..."
-if ! pyenv versions --bare | grep -Eq '^3\.11\.[0-9]+$'; then
+if ! pyenv versions | grep -Eq '^[[:space:]]*\*?[[:space:]]*3\.11\.[0-9]+([[:space:]]|$)'; then
     fail "No installed pyenv Python 3.11.x version was found.
 Install one with:
   pyenv install 3.11
