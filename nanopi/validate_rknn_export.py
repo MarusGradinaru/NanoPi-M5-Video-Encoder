@@ -102,8 +102,7 @@ def promote_validated_model(
     validation_path: Path,
 ) -> None:
     """Promote the validated model and remove only its matching validation archive."""
-    if not target_path.parent.is_dir():
-        raise RuntimeError(f"Model directory does not exist: {target_path.parent}")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
     if not candidate_path.is_file() or candidate_path.stat().st_size == 0:
         raise RuntimeError("The validated candidate model is no longer available for promotion.")
     backup_path = target_path.with_name(target_path.name + ".bak")
@@ -179,8 +178,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     if candidate_model_path.stat().st_size == 0:
         raise RuntimeError(f"Candidate RKNN model is empty: {candidate_model_path}")
-    if not MODELS_DIR.is_dir():
-        raise FileNotFoundError(f"Model directory does not exist: {MODELS_DIR}")
 
     print("\n[1/3] Checking validation data...", flush=True)
     inputs, references, sample_names = load_validation_data(validation_path)
