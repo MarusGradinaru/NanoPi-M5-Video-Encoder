@@ -114,6 +114,15 @@ public:
         size_t sample_count,
         TensorLayout layout);
 
+    // Accept packed, contiguous RGB24 frames in NHWC order:
+    // [sample_count, input_height, input_width, 3]. The input is normalized
+    // with the same LUT used by the JPEG pipeline and converted directly to
+    // the native FP16 RKNN input buffer. The returned features are float32,
+    // row-major [sample_count, feature_count].
+    std::vector<float> infer_rgb24(
+        const uint8_t* rgb24,
+        size_t sample_count);
+
 private:
     friend class FeatureStream;
 

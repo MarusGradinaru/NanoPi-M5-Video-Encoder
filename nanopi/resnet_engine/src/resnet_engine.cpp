@@ -117,6 +117,18 @@ uint16_t float_to_half(float value) {
                                  half_mantissa);
 }
 
+const std::array<uint16_t, 256>& rgb24_normalization_lut() {
+    static const std::array<uint16_t, 256> lut = [] {
+        std::array<uint16_t, 256> values{};
+        for (size_t value = 0; value < values.size(); ++value) {
+            const float normalized = static_cast<float>(value) * (1.0F / 127.5F) - 1.0F;
+            values[value] = float_to_half(normalized);
+        }
+        return values;
+    }();
+    return lut;
+}
+
 float half_to_float(uint16_t value) {
     const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
     uint32_t exponent = (value >> 10) & 0x1fu;
@@ -292,10 +304,6 @@ public:
         if (width_ == 0 || height_ == 0 || (width_ & 1U) != 0U || (height_ & 1U) != 0U) {
             throw std::runtime_error("MPP/RGA requires non-zero even model input dimensions.");
         }
-        for (size_t value = 0; value < normalization_lut_.size(); ++value) {
-            const float normalized = static_cast<float>(value) * (1.0F / 127.5F) - 1.0F;
-            normalization_lut_[value] = float_to_half(normalized);
-        }
         try {
             initialize();
         } catch (...) {
@@ -428,8 +436,9 @@ public:
 
         stage_start = Clock::now();
         const size_t pixel_values = rgb_.size();
+        const auto& normalization_lut = rgb24_normalization_lut();
         for (size_t index = 0; index < pixel_values; ++index) {
-            destination[index] = normalization_lut_[rgb_[index]];
+            destination[index] = normalization_lut[rgb_[index]];
         }
         stage_stop = Clock::now();
         if (timing != nullptr) {
@@ -601,7 +610,6 @@ private:
     uint32_t vertical_stride_ = 0;
     size_t input_buffer_capacity_ = 0;
     std::vector<uint8_t> rgb_;
-    std::array<uint16_t, 256> normalization_lut_{};
 
     MppCtx context_ = nullptr;
     MppApi* mpi_ = nullptr;
@@ -1014,6 +1022,78 @@ std::vector<float> ResNetEngine::infer_preprocessed(
         result.insert(result.end(), batch_result.begin(), batch_result.end());
         current += valid;
     }
+    return result;
+}
+
+std::vector<float> ResNetEngine::infer_rgb24(
+    const uint8_t* rgb24,
+    size_t sample_count) {
+    if (sample_count == 0) {
+        return {};
+    }
+    if (rgb24 == nullptr) {
+        throw std::invalid_argument("infer_rgb24 received a null frame buffer.");
+    }
+
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->closed) {
+        throw std::runtime_error("ResNetEngine is closed.");
+    }
+    if (impl_->input_channels != 3U) {
+        throw std::runtime_error("infer_rgb24 requires a 3-channel RGB model input.");
+    }
+    if (impl_->sample_elements == 0U || impl_->feature_count == 0U) {
+        throw std::runtime_error("ResNetEngine has invalid input or output dimensions.");
+    }
+    if (sample_count > std::numeric_limits<size_t>::max() / impl_->sample_elements) {
+        throw std::length_error("infer_rgb24 input size overflows size_t.");
+    }
+    if (sample_count > std::numeric_limits<size_t>::max() / impl_->feature_count) {
+        throw std::length_error("infer_rgb24 output size overflows size_t.");
+    }
+    if (impl_->input_mem == nullptr || impl_->input_mem->virt_addr == nullptr) {
+        throw std::runtime_error("RKNN input memory is not available.");
+    }
+
+    const size_t input_sample_elements = impl_->sample_elements;
+    const size_t input_sample_bytes = impl_->input_sample_bytes;
+    const auto& normalization_lut = rgb24_normalization_lut();
+    auto* native_input = static_cast<uint16_t*>(impl_->input_mem->virt_addr);
+
+    std::vector<float> result;
+    result.reserve(sample_count * impl_->feature_count);
+
+    size_t current = 0;
+    while (current < sample_count) {
+        const size_t valid = std::min<size_t>(
+            impl_->batch_size, sample_count - current);
+
+        for (size_t slot = 0; slot < valid; ++slot) {
+            const size_t source_sample = current + slot;
+            const uint8_t* source = rgb24 + source_sample * input_sample_elements;
+            uint16_t* destination = native_input + slot * input_sample_elements;
+
+            // RGB24 is packed NHWC, matching the native RKNN input layout.
+            // Lookup converts uint8 RGB channels directly to normalized FP16.
+            for (size_t index = 0; index < input_sample_elements; ++index) {
+                destination[index] = normalization_lut[source[index]];
+            }
+        }
+
+        if (valid < impl_->batch_size) {
+            const uint16_t* last_sample =
+                native_input + (valid - 1U) * input_sample_elements;
+            for (size_t slot = valid; slot < impl_->batch_size; ++slot) {
+                std::memcpy(native_input + slot * input_sample_elements,
+                            last_sample, input_sample_bytes);
+            }
+        }
+
+        std::vector<float> batch_result = impl_->run_batch(valid);
+        result.insert(result.end(), batch_result.begin(), batch_result.end());
+        current += valid;
+    }
+
     return result;
 }
 

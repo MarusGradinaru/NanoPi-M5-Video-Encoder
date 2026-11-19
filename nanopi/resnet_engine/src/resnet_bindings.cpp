@@ -206,6 +206,55 @@ PYBIND11_MODULE(resnet_engine, module) {
              py::arg("input_tensor"),
              "Run already-normalized float32 NCHW or NHWC tensors through RKNN. "
              "Incomplete final batches are padded and padding outputs are discarded.")
+        .def("infer_rgb24",
+             [](ResNetEngine& engine, py::object frames_object) {
+                 // Accept only an existing ndarray so the binding never silently
+                 // converts a Python sequence or creates a temporary array.
+                 if (!py::isinstance<py::array>(frames_object)) {
+                     throw py::type_error("frames must be a NumPy ndarray.");
+                 }
+                 py::array frames = py::reinterpret_borrow<py::array>(frames_object);
+                 if (!frames.dtype().is(py::dtype::of<uint8_t>())) {
+                     throw py::type_error("frames must have dtype uint8 (RGB24).");
+                 }
+                 if ((frames.flags() & py::array::c_style) == 0) {
+                     throw py::value_error("frames must be C-contiguous packed RGB24 data.");
+                 }
+
+                 const py::buffer_info buffer = frames.request();
+                 if (buffer.ndim != 4) {
+                     throw py::value_error(
+                         "frames must have shape (N, input_height, input_width, 3).");
+                 }
+
+                 const EngineInfo info = engine.info();
+                 const auto* shape = buffer.shape.data();
+                 if (shape[1] != static_cast<py::ssize_t>(info.input_height) ||
+                     shape[2] != static_cast<py::ssize_t>(info.input_width) ||
+                     shape[3] != 3 || info.input_channels != 3U) {
+                     throw py::value_error(
+                         "frames shape does not match the engine RGB input; expected "
+                         "(N, " + std::to_string(info.input_height) + ", " +
+                         std::to_string(info.input_width) + ", 3).");
+                 }
+                 if (shape[0] < 0) {
+                     throw py::value_error("frames has an invalid sample dimension.");
+                 }
+
+                 const size_t samples = static_cast<size_t>(shape[0]);
+                 const auto* data = static_cast<const uint8_t*>(buffer.ptr);
+                 std::vector<float> features;
+                 {
+                     py::gil_scoped_release release;
+                     features = engine.infer_rgb24(data, samples);
+                 }
+                 return make_feature_array(features, samples, info.feature_count);
+             },
+             py::arg("frames"),
+             "Run packed uint8 RGB24 NHWC frames directly through RKNN. "
+             "Input must be C-contiguous with shape (N, input_height, input_width, 3). "
+             "Normalization and FP16 conversion are performed in native code; "
+             "incomplete final RKNN batches are padded automatically.")
         .def("__enter__", [](const std::shared_ptr<ResNetEngine>& engine) { return engine; })
         .def("__exit__", [](ResNetEngine& engine, py::object, py::object, py::object) {
             py::gil_scoped_release release;

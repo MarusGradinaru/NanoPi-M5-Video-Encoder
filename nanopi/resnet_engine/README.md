@@ -311,6 +311,28 @@ The layout is inferred from the tensor shape and must match the loaded model dim
 
 The pybind11 bindings release the Python GIL around the long-running native processing and inference calls.
 
+### Infer directly from packed RGB24 frames
+
+`infer_rgb24()` is the direct-memory input API for video pipelines that already produce resized RGB24 frames, for example through FFmpeg's Rockchip decoder and RGA filter. It accepts a C-contiguous `uint8` NumPy array in NHWC order with the exact shape `(N, input_height, input_width, 3)`:
+
+```python
+import numpy as np
+
+# `raw_rgb24` contains tightly packed RGB24 frames, with no row padding.
+frame_count = len(raw_rgb24) // (180 * 320 * 3)
+frames = np.frombuffer(raw_rgb24, dtype=np.uint8).reshape(
+    frame_count, 180, 320, 3
+)
+features = engine.infer_rgb24(frames)
+
+# Result shape: [N, 2048], float32
+print(features.shape, features.dtype)
+```
+
+The array must be `uint8`, C-contiguous, RGB channel order (not BGR), and match the loaded model's width and height. The binding passes the array's existing memory directly to C++; it does not create a float32 copy. Native code applies the same 256-entry normalization LUT as the JPEG pipeline and writes FP16 NHWC values directly into the RKNN Zero-Copy input buffer. It does not initialize or use the MPP/RGA JPEG preprocessor. Arbitrary sample counts are split into fixed-size RKNN batches; an incomplete last batch is padded and padded outputs are discarded. The method returns row-major float32 features.
+
+`infer_preprocessed()` remains available for callers that already own normalized float32 tensors.
+
 ## C++ API
 
 The public header is:
@@ -332,6 +354,7 @@ The main API is in namespace `resnet_npu`:
 - `process_folder(folder_path, chunk_size = 64, recursive = false)`
 - `process_files(image_paths, chunk_size = 64)`
 - `infer_preprocessed(tensor, sample_count, layout)`
+- `infer_rgb24(rgb24, sample_count)` — packed contiguous RGB24 frames in NHWC order
 - `FeatureStream::next()`, `close()`, and `stats()`
 
 The engine uses `shared_from_this()` when creating feature streams, so C++ applications should own it through `std::shared_ptr<ResNetEngine>` rather than a stack-allocated `ResNetEngine` object.
