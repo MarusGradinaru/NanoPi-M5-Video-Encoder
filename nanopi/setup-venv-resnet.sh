@@ -194,7 +194,6 @@ log "Installing the pinned project dependencies..."
 "$VENV_PYTHON" -m pip install \
     "scikit-learn==1.7.1" \
     "Pillow==13.0.0" \
-    "openpyxl==3.1.5" \
     "huggingface_hub==2.3.0" \
     "pybind11==3.1.0"
 
@@ -205,7 +204,6 @@ from importlib import import_module, metadata
 packages = (
     ("scikit-learn", "sklearn", "1.7.1"),
     ("Pillow", "PIL", "13.0.0"),
-    ("openpyxl", "openpyxl", "3.1.5"),
     ("huggingface_hub", "huggingface_hub", "2.3.0"),
     ("pybind11", "pybind11", "3.1.0"),
 )
