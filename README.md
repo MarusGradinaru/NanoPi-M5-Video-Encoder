@@ -1,58 +1,89 @@
 # NanoPi M5 Video Encoder
 
-This project detects scene changes in TV recordings, classifies the resulting thumbnails with a ResNet50V2-based presenter classifier, and encodes the selected scenes into a single HEVC video using the Rockchip RK3576 hardware encoder.
+A hardware-accelerated video processing and encoding pipeline for detecting specific TV news presenters in video recordings, extracting their appearances, and combining the selected segments into a single HEVC video.
 
-The main workflow runs on a FriendlyElec NanoPi M5. An optional Windows/WSL workflow can regenerate the RKNN feature-extractor model, while the NanoPi performs normal inference through a native C++ engine linked directly to the RKNN Runtime.
+The project runs on a FriendlyElec NanoPi M5 equipped with the Rockchip RK3576 SoC. It uses FFmpeg with Rockchip MPP and RGA for video decoding and image processing, a native C++ ResNet50V2 feature-extraction engine connected to the RK3576 NPU, and a multiclass Logistic Regression classifier.
+
+The current classifier is configured for **Andreea Esca**, a Romanian TV news presenter. The training pipeline supports additional classes, allowing other presenters to be included as the dataset expands.
 
 ## Why this project exists
 
 The motivation is deliberately specific: I keep a personal collection of Romania's most sexy and beautiful TV news presenters. Building that collection the traditional way was a lot of work: I had to find the exact timecodes for each appearance, cut the scenes manually, and encode the clips in software on a PC. That took a great deal of time, and keeping entire news recordings just to save a few short appearances wasted a lot of storage space.
 
-This project automates that process, selecting the scenes I want and combining them into a much smaller video using the RK3576's hardware encoder. The current classifier is configured for **Andreea Esca**, a Romanian TV news presenter. The training workflow supports additional classes, so other presenters can be included as the dataset is expanded. In other words, this is a video-encoding project with a very particular fan-driven use case. 🙂
+This project automates that process, selecting the appearances I want and combining them into a much smaller video using the RK3576's hardware encoder.
+
+In other words, this is a video-encoding project with a very particular fan-driven use case. 🙂
 
 ## Processing workflow
 
-1. **Detect scene changes.** The Rockchip-enabled FFmpeg build decodes and analyzes the source video, then extracts a thumbnail for each detected scene boundary.
-2. **Extract image features.** The native `ResNetEngine` uses MPP for JPEG decoding, RGA for color conversion, and RKNN Runtime for multi-batch inference on the RK3576 NPU.
-3. **Classify scenes.** A separately trained multiclass Logistic Regression classifier evaluates the 2048-dimensional ResNet50V2 feature vectors.
-4. **Review uncertain predictions.** The processing script creates an Excel report and can move borderline candidates into a review folder.
-5. **Encode and mux.** The selected time ranges are encoded with the Rockchip HEVC encoder and combined into `output_video.mkv`.
+The main processing pipeline no longer relies on FFmpeg scene-change detection (`scdet`). Instead, it continuously samples the source video and classifies the sampled frames.
 
-Scene processing and video encoding can be run separately. This allows the predictions to be inspected and corrected before encoding starts.
+The workflow consists of the following stages:
+
+1. **Frame sampling.** FFmpeg decodes the source video using Rockchip MPP and produces RGB24 frames at a configurable sampling interval. The default interval is 160 ms.
+2. **Feature extraction.** Each sampled frame is resized to 320×180 using Rockchip RGA and passed directly to the native `ResNetEngine`.
+3. **NPU inference.** The C++ engine performs ResNet50V2 feature extraction through RKNN Runtime, using fixed-size batches and the RK3576 NPU.
+4. **Classification.** A separately trained multiclass Logistic Regression classifier evaluates the 2048-dimensional feature vectors and calculates the probability of each class.
+5. **Segment validation.** A rolling validation window checks classification consistency before accepting a candidate. Minimum run length and minimum duration requirements prevent isolated positive predictions from becoming video segments.
+6. **Review handling.** Segments are separated into automatically validated results and lower-confidence candidates that can be reviewed manually.
+7. **Video encoding.** The validated time ranges are encoded using the Rockchip HEVC hardware encoder.
+8. **Final muxing.** The resulting segments are combined into `output_video.mkv`.
+
+The frame-processing stage uses a streaming pipeline. Decoded RGB24 frames are transferred from FFmpeg directly to the native ResNet engine without creating an intermediate collection of JPEG files.
+
+The classification and encoding stages can also be executed independently. This allows the detection results to be inspected before encoding starts.
+
+### Segment validation
+
+The classifier uses three mutually exclusive states:
+
+- **VALID** — target-class probability is at or above the main threshold.
+- **REVIEW** — probability is below the main threshold but at or above the optional review threshold.
+- **NONE** — probability is below both thresholds.
+
+A rolling validation window confirms transitions between these states using a configurable number of matching votes and a required consecutive run at the end of the window.
+
+A candidate must also satisfy the minimum number of consecutive samples and minimum continuous positive coverage before it becomes an active segment.
+
+This approach is designed to avoid accepting isolated detections or short classification fluctuations as genuine appearances.
 
 ## Requirements
 
 ### NanoPi M5
 
 - FriendlyElec **NanoPi M5 / Rockchip RK3576**, running 64-bit ARM Ubuntu.
-- A working RK3576 NPU driver and RKNN Runtime. The helper script in `nanopi/resnet_engine/` downloads the matching RKNN Runtime SDK files used by the native engine.
-- Rockchip MPP and RGA libraries and headers. The project builds the pinned MPP, RGA, and FFmpeg sources with `ffmpeg/setup-ffmpeg.sh`.
+- A working RK3576 NPU driver and RKNN Runtime.
+- Rockchip MPP and RGA libraries, headers, and `pkg-config` files.
+- A Rockchip-enabled FFmpeg build with MPP and RGA support.
 - `pyenv` with Python **3.12.x** installed.
-- C++ build tools (`g++`, `pkg-config`) for the native engine.
+- C++ build tools (`g++`, `pkg-config`) for the native ResNet engine.
 - Access to the project's Hugging Face bucket to download model files and, when required, the training dataset.
 
-The standard NanoPi inference path does **not** use RKNN Toolkit Lite 2. It uses the native C++ `ResNetEngine` linked to `librknnrt.so`. The Python environment provides the application dependencies and the thin pybind11 extension.
+The standard NanoPi inference path uses the native C++ `ResNetEngine` linked directly to `librknnrt.so`. It does not require RKNN Toolkit Lite 2.
+
+The Python environment provides the application dependencies and the thin pybind11 extension.
 
 ### Optional PC / WSL environment for model conversion
 
 - Windows with WSL2 and Ubuntu on x86-64.
 - `pyenv` with Python **3.11.x** installed.
-- SSH/SCP connectivity to the NanoPi if you want the build script to transfer the generated model and validation archive automatically.
+- CPU-only PyTorch 2.4.0.
+- SSH/SCP connectivity to the NanoPi if you want to transfer generated model artifacts automatically.
 
-The PC/WSL workflow is only needed when exporting or updating the RKNN feature-extractor model. It is not required for ordinary video processing when the required model files are already installed on the NanoPi.
+The PC/WSL workflow is only needed when exporting or updating the RKNN feature-extractor model. It is not required for ordinary video processing.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `nanopi/` | Main NanoPi workflow: scene processing, segment encoding, classifier training, model validation, and helper scripts. |
+| `nanopi/` | Main NanoPi workflow: frame sampling, classification, segment encoding, classifier training, model validation, and helper scripts. |
 | `nanopi/resnet_engine/` | Native C++ ResNet engine, Python bindings, benchmark, JPEG diagnostic utility, and RKNN Runtime SDK download helper. See its [dedicated README](nanopi/resnet_engine/README.md). |
-| `pc-wsl/` | Optional PC/WSL workflow that exports the frozen Keras ResNet50V2 feature extractor to ONNX and converts it to RKNN. |
-| `resnet/` | Local model files, dataset, and build/validation artifacts. These files are downloaded or generated locally and are not stored in Git. |
-| `ffmpeg/` | `setup-ffmpeg.sh`, which builds the Rockchip-enabled MPP, RGA, and FFmpeg stack. Downloaded source trees and build files are ignored by Git. |
-| `windows/` | Optional Windows helpers for SSH configuration, launching the remote workflow, and Explorer context-menu shortcuts. |
+| `pc-wsl/` | Optional PC/WSL workflow that exports the Keras ResNet50V2 feature extractor to ONNX and converts it to RKNN. |
+| `resnet/` | Local model files, training dataset, and build/validation artifacts. These files are downloaded or generated locally and are not stored in Git. |
+| `ffmpeg/` | `setup-ffmpeg.sh`, which builds the Rockchip-enabled MPP, RGA, and FFmpeg stack. |
+| `windows/` | Windows helpers for SSH configuration, launching the remote processing workflow, and Explorer context-menu shortcuts. |
 
-The `.gitignore` excludes generated build products, virtual environments, downloaded model files, datasets, and local artifacts. The repository contains the scripts and source needed to reproduce the workflow, not the large model and dataset files.
+The `.gitignore` excludes generated build products, virtual environments, downloaded model files, datasets, and local artifacts. The repository contains the scripts and source required to reproduce the workflow, not the large model and dataset files.
 
 ## Getting started on the NanoPi
 
@@ -92,11 +123,11 @@ cd ../nanopi
 source .venv-resnet/bin/activate
 ```
 
-The script selects an installed Python 3.12.x release through `pyenv`, creates or reuses `.venv-resnet`, and installs the pinned application dependencies, including scikit-learn, Pillow, openpyxl, Hugging Face Hub, and pybind11.
+The script selects an installed Python 3.12.x release through `pyenv`, creates or reuses `.venv-resnet`, and installs the pinned application dependencies, including scikit-learn, Pillow, Hugging Face Hub, and pybind11.
 
 ### 4. Build the native ResNet engine
 
-The standard NPU workflow needs both the shared C++ library and its Python extension. The first command downloads the RKNN Runtime headers and AArch64 runtime library from the `v2.3.2` tag of the upstream Rockchip RKNN Toolkit2 repository. The next command builds the engine against the MPP/RGA stack installed in `/opt/rkmpp-stack`. And the last one builds the resnet engine python extension.
+The standard NPU workflow requires both the shared C++ library and its Python extension.
 
 Run these commands from `nanopi/`:
 
@@ -106,7 +137,15 @@ Run these commands from `nanopi/`:
 ./resnet_engine/src/build-resnet-engine-python-ext.sh
 ```
 
-The resulting shared library and Python extension are local build products and are not committed to Git. The engine build, its architecture, and its API are documented in [nanopi/resnet_engine/README.md](nanopi/resnet_engine/README.md).
+The first command downloads the RKNN Runtime headers and AArch64 runtime library from the `v2.3.2` tag of the upstream Rockchip RKNN Toolkit2 repository.
+
+The second builds the native engine against the installed MPP/RGA stack.
+
+The third builds the Python extension used by the main processing script.
+
+The resulting shared library and Python extension are local build products and are not committed to Git.
+
+The engine architecture, build process, and programming interfaces are documented in [nanopi/resnet_engine/README.md](nanopi/resnet_engine/README.md).
 
 ### 5. Download the model files
 
@@ -131,58 +170,121 @@ Or synchronize both folders at once:
 
 > **Important:** `get-resnet.sh` uses `hf buckets sync --delete`. Extra local files inside each selected folder may be deleted if they are not present in the remote bucket. Back up custom files before synchronizing those folders.
 
-The `models/` folder must contain the multiclass classifier and the RKNN feature-extractor variant you intend to use. The default processing and training batch size is 4, so the normal default extractor is the `_batch4.rknn` model.
+The `models/` directory must contain:
 
-### 6. Process a video
+- `resnet50v2_logistic_classifier.npz` — trained multiclass classifier parameters.
+- The RKNN ResNet50V2 feature-extractor model corresponding to the selected inference batch size.
 
-With virtual environment activated, run `process_video.py`. The `--target-class` option is required and must match a class name in the classifier model.
+The default batch size is 4, so the normal default extractor is the `_batch4.rknn` model.
+
+## Running Stage 1 — Processing the video
+
+Go to `/nanopi` folder, activate the virtual environment (if it's not active), and run `process_video.py`:
 
 ```bash
-cd ../nanopi
+cd ~/NanoPi-M5-Video-Encoder/nanopi
+source .venv-resnet/bin/activate
+
 python process_video.py \
   --target-class andreea-esca \
-  --candidate-threshold 0.4 \
+  --sampling 160 \
+  --threshold 0.75 \
   "/path/to/my_video.ts"
 ```
 
-The default target-class probability threshold is `0.75`. With `--candidate-threshold 0.4`, non-validated predictions whose target-class probability falls between `0.4` and `0.75` are placed in `scenes_to_review/`. A candidate threshold of `0` disables review-candidate handling. The candidate threshold must not exceed the main threshold.
+The `--target-class` option is required and must match a class name stored in the classifier model.
 
-By default, the script creates a working directory named after the input video, next to the source file. For example, `/recordings/my_video.ts` produces `/recordings/my_video/`. The working directory must not already contain files; use `--out` to choose another location or move the previous results first.
+By default, the script creates a working directory named after the input video, next to the source file.
+
+For example:
+
+```text
+/recordings/my_video.ts
+```
+
+produces:
+
+```text
+/recordings/my_video/
+```
+
+The output directory must not already contain files. Use `--out` to select another location or move the previous results first.
+
+### Processing output
 
 The processing directory contains:
 
-- `scenes_all_other/` — the extracted thumbnails that have not been moved into a classified folder.
-- `scenes_validated/` — scenes accepted by the classifier. These are the scenes used by the encoder.
-- `scenes_to_review/` — borderline candidates that can be inspected and manually moved into `scenes_validated/` if they should be included.
-- `scene_predictions.xlsx` — the formatted prediction report, always generated.
-- `scene_predictions.csv` — an optional machine-readable report, generated with `--csv-predict`.
-- `source_link.<extension>` — a relative symbolic link to the original video, used by the encoding script.
-- `delete_source.sh` and `delete_source.bat` — generated helper launchers for deleting the source video after encoding.
+| Path | Purpose |
+|---|---|
+| `seg_validated/` | Automatically validated target-class segments. These are the segments used by the encoder. |
+| `seg_review/` | Candidate segments that meet the review threshold but not the main validation threshold. |
+| `source_link.<ext>` | Relative symbolic link to the original source video, used by the encoder. |
+| `delete_source.sh` | Helper script for deleting the source video after processing. |
+| `delete_source.bat` | Windows launcher for the source-deletion helper. |
+| `log-class-work.txt` | Optional processing console log. |
+| `log-class-frames.txt` | Optional per-frame classification probabilities. |
 
-After processing, inspect `scene_predictions.xlsx` and the images in `scenes_to_review/`. Move any review candidate that you want to encode into `scenes_validated/`.
+The timestamp information is stored in the filenames of the extracted segment thumbnails:
 
-#### Useful processing options
+```text
+HH-MM-SS-mmm - HH-MM-SS-mmm.jpg
+```
+
+The first timestamp represents the segment start; the second represents its end.
+
+After processing, inspect the images in `seg_review/`. Move any candidate you want to include into `seg_validated/`.
+
+### Useful processing options
 
 | Option | Default / behavior |
 |---|---|
-| `--threshold` | `0.75`; target-class probability required for automatic validation. |
-| `--candidate-threshold` | `0`; lower probability bound for review candidates. `0` disables the review range. |
-| `--out PATH` | Select the working directory instead of using `<video_stem>` beside the input video. |
-| `--scene-threshold` | `10`; FFmpeg scene-change detection sensitivity. |
-| `--width` | `320`; thumbnail width. The native ResNet engine expects 320x180 JPEGs. |
-| `--offset SECONDS` | Manually override the timestamp offset used during scene extraction. |
-| `--skip-scdet` | Reuse thumbnails already present in an existing working directory and rerun classification. |
-| `--csv-predict` | Also write `scene_predictions.csv`. |
-| `--resnet-cpu` | Use TensorFlow ResNet50V2 on the CPU instead of the RK3576 NPU. TensorFlow must be installed in the active environment. |
-| `--batch-size N` | Default `4`. Selects the matching RKNN model when `--extractor` is omitted. With `--resnet-cpu`, it controls the CPU inference batch size. |
-| `--extractor PATH` | Explicit RKNN model path. When supplied, the batch size is inferred from its filename and overrides `--batch-size`. A filename without `_batchN` means batch 1. Ignored with `--resnet-cpu`. |
-| `--update-size N` | Default `8` inference calls between progress updates. With batch 4, this reports progress every 32 images. |
+| `--target-class NAME` | Required. Class name to detect. |
+| `--threshold N` | `0.75`; minimum target-class probability for automatic validation. |
+| `--review-thr N` | `0`; lower probability threshold for review candidates. `0` disables review handling. |
+| `--sampling MS` | `160`; minimum interval between sampled frames, in milliseconds. Accepted range: 5–1000 ms. |
+| `--batch-size N` | `4`; number of images per inference batch. Selects the corresponding RKNN feature-extractor model. |
+| `--classifier PATH` | Explicit multiclass classifier file. |
+| `--extractor PATH` | Explicit RKNN feature-extractor model. When supplied, its filename determines the effective batch size. |
+| `--window N` | `5`; samples in the rolling validation window. |
+| `--votes N` | `4`; matching-category samples required inside the validation window. |
+| `--streak N` | `2`; consecutive matching samples required at the end of the window. |
+| `--min-time MS` | `1000`; minimum continuous positive coverage required to validate a candidate. |
+| `--min-run N` | `3`; minimum consecutive matching-category samples required to validate a candidate. |
+| `--deint 0/1` | `1`; enable or disable MPP hardware deinterlacing. |
+| `--out PATH` | Custom working directory. |
+| `--offset SECONDS` | Manual timestamp correction. Completely overrides the offset automatically calculated by default using FFprobe metadata. |
+| `--verbose` | Show additional detection events and diagnostics. |
+| `--log-work` | Save displayed console output to `log-class-work.txt`, excluding transient progress updates. |
+| `--log-frames` | Write a classification-probability record for each sampled frame to `log-class-frames.txt`. |
 
-The accepted RKNN batch sizes are `1` or positive even integers (`2`, `4`, `6`, and so on). Without `--extractor`, `--batch-size` chooses the corresponding filename in `resnet/models`. If an explicit extractor path is supplied, its filename is authoritative: `_batch8` means batch 8, while a filename with no `_batchN` suffix means batch 1.
+The accepted RKNN batch sizes are `1` or positive even integers (`2`, `4`, `6`, `8`, and so on). Each batch size requires a matching fixed-batch RKNN model.
 
-When using `--skip-scdet`, an existing working directory and its `scenes_all_other/` thumbnail directory are required. If no input video is supplied, `--out` is required. The script restores images from `scenes_validated/` and `scenes_to_review/` so that they can all be classified again. A valid `source_link.<extension>` is still required later if the results are to be encoded.
+When `--extractor` is supplied explicitly, the model filename is authoritative: `_batch8` means batch 8, while a filename without `_batchN` means batch 1.
 
-### 7. Encode the selected scenes
+For the complete option list:
+
+```bash
+python process_video.py --help
+```
+
+### Timestamp handling
+
+The processing script obtains the container start time and video stream start time through FFprobe. The difference between these timestamps is used to calculate the default offset automatically. This is important for transport-stream recordings where container and video timestamps do not necessarily begin at the same point. The calculated offset can be overridden with `--offset`.
+
+### Progress and performance information
+
+During processing, the script reports:
+
+- Number of sampled frames.
+- Average sampling interval.
+- Number of validated and review segments.
+- Current position in the source recording.
+- Realtime processing factor.
+- Current and maximum monitored SoC temperature.
+
+The processing summary also includes the time spent reading frames, packing RGB24 batches, running ResNet inference, and executing the Logistic Regression classifier.
+
+## Running Stage 2 — Encoding the selected segments
 
 Pass the processing directory to `encode_segments.py`:
 
@@ -192,48 +294,283 @@ python encode_segments.py \
   "/path/to/my_video"
 ```
 
-`--qp`, `--tier`, and `--level` are required for encoding. The example values are the quality/file-size settings used in this project; adjust them for your own material. The script reads the selected intervals from `scenes_validated/`, uses `source_link.<extension>` to access the source recording, creates individual clips in `encoded_seg/`, and muxes them into `output_video.mkv`.
+The input must be the processing directory generated by `process_video.py`.
 
-Existing encoded clips are skipped unless `--force-encode` is specified. Useful additional options include:
+The encoder reads the intervals from `seg_validated/`, accesses the original recording through `source_link.<ext>`, encodes the selected ranges into individual MP4 files, and muxes them into `output_video.mkv`. Individual encoded clips are stored in `encoded_seg/`.
 
-| Option | Behavior |
+Existing encoded clips are skipped unless `--force-encode` is specified.
+
+### Encoding options
+
+| Option | Default / behavior |
 |---|---|
-| `--skip-mux` | Encode missing clips but do not create/update `output_video.mkv`. |
-| `--just-mux` | Skip encoding and mux all existing timestamp-named MP4 files in `encoded_seg/`. Does not require `scenes_validated/` or `source_link.*`. |
-| `--force-encode` | Re-encode and overwrite every selected clip. |
-| `--decode-mode auto\|hardware\|software` | Default `auto`: try Rockchip MPP decoding and fall back to software decoding if hardware decoding fails. `hardware` disables fallback; `software` forces software decoding. HEVC output encoding remains hardware-accelerated. |
-| `--scan-type auto\|detect\|progressive\|interlaced` | Default `auto` trusts explicit `ffprobe` scan metadata and errors if it is unknown. Use `detect` for the slower FFmpeg `idet` scan, or specify the known source type. |
-| `--edge-trim SECONDS` | Default `0.060`; trim this amount from both ends of the resulting segment. |
-| `--seek-back SECONDS` | Default `5.0`; seek before a segment start to improve accurate trimming. |
-| `--sb` / `--se` | Define a source-time correction range. |
-| `--offset SECONDS` | Apply a signed source-time shift to video and audio boundaries inside the correction range. |
-| `--audio-delay MS` | Apply an audio-only synchronization correction inside the correction range. Positive values delay audio; negative values advance it. |
+| `--qp N` | `20`; HEVC encoder quantization parameter. |
+| `--tier NAME` | `high`; HEVC tier: `main` or `high`. |
+| `--level NAME` | `5.1`; HEVC level. |
+| `--edge-trim MS` | `40`; trim this amount from both ends of each resulting segment, after adjacent ranges have been merged. |
+| `--decode-mode NAME` | `auto`; input decoding mode: `auto`, `hardware`, or `software`. Automatic mode retries with software decoding if hardware decoding fails. |
+| `--scan-type NAME` | `auto`; source scan type: `auto`, `detect`, `progressive`, or `interlaced`. |
+| `--seek-back SECONDS` | `5.0`; seek before a segment start to improve accurate trimming. |
+| `--sb TIME` | `00:00:00.000`; beginning of the timing-correction range. |
+| `--se TIME` | Recording end; exclusive end of the timing-correction range. |
+| `--offset MS` | `0`; signed video and audio time correction in milliseconds. |
+| `--audio-delay MS` | `0`; signed audio-only synchronization correction in milliseconds. |
+| `--skip-mux` | Encode missing clips without creating or updating `output_video.mkv`. |
+| `--just-mux` | Skip encoding and mux existing timestamp-named MP4 clips in `encoded_seg/`. Overrides `--skip-mux`. |
+| `--force-encode` | Re-encode and overwrite all selected clips. |
+| `--log-work` | Save displayed console output to `log-enc-work.txt`. |
 
-For the complete option list, run `python encode_segments.py --help`.
+The supported HEVC levels are:
 
-### Alternative: run the two-step wrapper
-
-`process-and-encode.sh` runs scene processing and encoding as a guided workflow. Before using it, edit the configuration block near the top of the script, especially:
-
-- `TARGET_CLASS`
-- `PROJECT_DIR`
-- `CANDIDATE_THRESHOLD`
-- `RESNET_BATCH_SIZE` and `RESNET_UPDATE_SIZE`
-- `ENCODER_QP`, `ENCODER_TIER`, and `ENCODER_LEVEL`
-
-Then run it from `nanopi/`:
-
-```bash
-./process-and-encode.sh "my_video.ts"
+```text
+1, 2, 2.1, 3, 3.1, 4, 4.1, 5, 5.1, 5.2, 6, 6.1, 6.2
 ```
 
-The wrapper resolves a filename relative to `PROJECT_DIR`, or accepts an absolute input path. It pauses after a new classification run so the images can be reviewed before encoding. If a completed processing directory already exists (with `scenes_validated/` and `scene_predictions.xlsx`), it skips scene processing and proceeds to encoding. **If the processing directory exists but does not meet that completion check, the wrapper removes its contents before starting a new run.** Keep any files you need before reusing an incomplete directory.
+### Video scan type and decoding
 
-The wrapper builds the extractor filename from `RESNET_BATCH_SIZE`, so the matching RKNN model must be present in `resnet/models/`.
+The encoder supports both progressive and interlaced sources.
+
+In automatic scan-type mode, the script uses explicit FFprobe `field_order` metadata. If the metadata is insufficient, processing stops rather than guessing. Use `--scan-type detect` to run the slower FFmpeg `idet` analysis, or explicitly specify `progressive` or `interlaced` when the source type is already known.
+
+For interlaced sources, the output frame rate is doubled after deinterlacing.
+
+In automatic decoding mode, the script tries Rockchip MPP hardware decoding and falls back to software decoding if necessary. Software decoding can also be selected explicitly.
+
+HEVC output encoding always uses the Rockchip hardware encoder.
+
+### Timing correction
+
+The correction range allows timing adjustments to be applied selectively to segments based on their original source start times.
+
+For example:
+
+```bash
+python encode_segments.py \
+  --qp 20 --tier high --level 5.1 \
+  --sb 00:12:00.000 --se 00:25:00.000 \
+  --offset -120 \
+  "/path/to/my_video"
+```
+
+The `--offset` parameter shifts both video and audio boundaries. Positive values move them forward; negative values move them backward.
+
+The `--audio-delay` parameter applies an additional audio-only synchronization correction. Positive values delay audio, while negative values advance it.
+
+Existing encoded clips are not automatically replaced when corrections change. Use `--force-encode` to apply new settings to existing clips.
+
+For the complete option list:
+
+```bash
+python encode_segments.py --help
+```
+
+## Understanding the offset adjustment in these two stages
+
+The project uses two independent timestamp offset mechanisms. They operate at different stages of the processing pipeline and serve different purposes.
+
+### 1. `process_video.py` — Automatic timestamp correction
+
+The processing script automatically calculates a timestamp offset using FFprobe:
+
+```text
+offset = video_stream.start_time - format.start_time
+```
+
+This correction compensates for the difference between the video stream's initial timestamp and the container's start time. It is primarily intended for the MPEG-TS recordings used by this project, where FFmpeg's default input timestamp handling can otherwise produce video timestamps that do not reflect the stream's actual position relative to the recording timeline.
+
+The calculated offset is applied using FFmpeg's `setpts` filter, before timestamps are passed to the Python processing pipeline. Consequently, the detected segment boundaries and the timestamps stored in the generated image filenames are aligned with the corrected video timeline.
+
+Frame selection is not affected by this correction. The `select` filter compares the time difference between consecutive selected frames, so adding the same constant offset to all timestamps does not change which frames are selected.
+
+**Manual override:**
+
+The optional `--offset` argument specifies a manual timestamp offset in seconds.
+
+- When omitted, the automatically calculated offset is used.
+- When specified, the manual value completely replaces the automatically calculated offset. It is not added to it.
+- Specifying `--offset 0` disables the automatic correction.
+
+Examples:
+
+```bash
+--offset 0.250    # Apply a manual +250 ms offset
+--offset -0.120   # Apply a manual -120 ms offset
+--offset 0        # Disable timestamp correction
+```
+
+### 2. `encode_segments.py` — Manual segment boundary correction
+
+The encoding script provides a separate `--offset` argument, expressed in milliseconds.
+
+Unlike the processing offset, this correction does not modify the timestamps generated by the processing stage. Instead, it shifts the start and end boundaries used when extracting segments from the original recording.
+
+The offset is added equally to both boundaries.
+A positive offset moves the extraction window later in the recording, while a negative offset moves it earlier. The segment duration remains unchanged.
+
+The encoder subsequently adds the container's original `start_time` because FFmpeg is invoked with `-copyts`, which preserves the input timestamp domain. The configured edge trimming is then applied to both boundaries.
+
+**Selective correction range:**
+
+The encoder allows this manual correction to be restricted to a specific portion of the recording:
+
+- `--sb` defines the beginning of the correction range (inclusive).
+- `--se` defines the end of the correction range (exclusive).
+
+A segment is selected for correction when its **start timestamp** falls inside this range. By default, the range covers the entire recording.
+
+Example:
+
+```bash
+--sb 00:12:00.000 --se 00:18:00.000 --offset 180
+```
+
+This shifts the extraction boundaries of segments starting between 12 and 18 minutes by +180 ms.
+
+The correction is applied to both video and audio extraction boundaries, preserving their relative synchronization. For audio-only synchronization adjustments, use the separate `--audio-delay` argument.
+
+**Intended use:**
+
+This mechanism is useful when a recording contains localized timestamp irregularities or discontinuities that cause the detected segment boundaries to become slightly misaligned with the actual content as presented by a video player.
+
+A constant offset can compensate for a corresponding constant timing error in the affected portion of the recording. It does not repair the original TS timestamps or correct arbitrary timestamp drift within a segment.
+
+Note that already encoded segments are skipped by default. Use `--force-encode` to re-encode existing segments after changing the correction parameters.
+
+### Summary
+
+| Script | Offset type | Unit | Purpose |
+|---|---|---|---|
+| `process_video.py` | Automatic, with manual override | Seconds | Correct the global video timestamp position before segment detection. |
+| `encode_segments.py` | Manual, optionally range-limited | Milliseconds | Shift selected segment extraction boundaries to compensate for local timing errors. |
+
+The two corrections are independent: the encoder's manual offset is applied on top of the segment timestamps produced by the processing stage. It does not replace or recalculate the processing-stage correction.
+
+## Standalone scene-change thumbnail extraction
+
+The repository also includes: `nanopi/scdet-extract.sh`
+
+This is a separate utility for extracting thumbnails at FFmpeg scene-change boundaries. It is independent of the ResNet classification pipeline and is not used by `process_video.py`.
+
+Run it from the NanoPi:
+
+```bash
+./scdet-extract.sh "/path/to/my_video.ts"
+```
+
+By default, the script creates:
+
+```text
+/path/to/my_video_scenes/
+```
+
+The initial frame is also extracted, and the timestamps are converted into consecutive thumbnail intervals.
+
+### Options
+
+| Option | Default / behavior |
+|---|---|
+| `--width PIXELS` | `320`; thumbnail width. Must be an even number. Height preserves the source aspect ratio. |
+| `--scene-threshold N` | `10`; FFmpeg scene-change sensitivity, from 0 to 100. |
+| `--offset SECONDS` | Manually override the automatically calculated timestamp offset. |
+| `--out DIRECTORY` | Custom output directory. |
+
+## Running the complete workflow with process-and-encode.sh
+
+`process-and-encode.sh` provides a guided two-stage workflow that runs classification followed by encoding and final muxing.
+
+Before running it, a configuration file must be available in the `nanopi/` directory:
+
+```text
+process-and-encode.ini
+```
+
+The script looks for the configuration in this order:
+
+1. `/dev/shm/process-and-encode.ini` — temporary configuration uploaded by the Windows launcher.
+2. `nanopi/process-and-encode.ini` — local configuration file.
+
+The temporary RAM configuration takes priority and is automatically removed when the wrapper exits.
+
+The configuration is parsed and validated before processing starts. Unknown parameters generate warnings and are ignored.
+
+### Configuration example
+
+Create `nanopi/process-and-encode.ini` and configure the parameters according to your preferences.
+
+The Windows directory includes a ready-to-use template:
+
+```text
+windows/process-and-encode-template.ini
+```
+
+Copy it and rename the copy to:
+
+```text
+process-and-encode.ini
+```
+
+Do not edit or rename the original template. It is intended to remain unchanged as a reference for users.
+
+The configuration contains two main sections.
+
+**Classifier parameters**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `target-class` | Required | Class name to detect. |
+| `threshold` | `0.75` | Probability threshold for validated segments. |
+| `review-thr` | `0.0` | Lower threshold for review candidates; `0` disables review. |
+| `batch-size` | `4` | Number of images per inference batch. |
+| `deint` | `1` | Hardware deinterlacing: `0` off, `1` on. |
+| `verbose` | `0` | Show additional diagnostic information. |
+| `log-class-work` | `0` | Save classifier console output. |
+| `log-class-frames` | `0` | Save per-frame classification probabilities. |
+
+**Encoder parameters**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `qp` | `20` | HEVC quantization parameter. |
+| `tier` | `high` | HEVC encoding tier. |
+| `level` | `5.1` | HEVC encoding level. |
+| `edge-trim` | `40` | Milliseconds trimmed from both segment edges. |
+| `scan-type` | `auto` | Video scan type. |
+| `sel-begin` | `start` | Beginning of the timing-correction range. |
+| `sel-end` | `end` | End of the timing-correction range. |
+| `offset` | `0` | Signed A/V correction in milliseconds. |
+| `audio-delay` | `0` | Signed audio-only correction in milliseconds. |
+| `log-enc-work` | `0` | Save encoder console output. |
+
+All boolean parameters use `0` or `1`.
+
+The selection range uses either `start`/`end` or an explicit `HH:MM:SS.mmm` timestamp.
+
+### Running the wrapper
+
+Run it from `nanopi/`:
+
+```bash
+./process-and-encode.sh "/absolute/path/to/my_video.ts"
+```
+
+The wrapper expects exactly one absolute Linux path to the input video.
+
+It creates the processing directory next to the source recording, using the video filename without its extension.
+
+The workflow is divided into two stages:
+
+1. **Classification:** the video is sampled and classified. When new results have been generated, the script waits for user confirmation so that review candidates can be inspected.
+2. **Encoding:** the validated segments are encoded and muxed into the final video.
+
+If completed processing results already exist, the wrapper skips classification and proceeds directly to encoding.
+
+If an incomplete processing directory exists, its contents are removed before a fresh run. Keep any files you need before reusing an incomplete directory.
 
 ## Training or updating the presenter classifier
 
-The dataset uses one subdirectory per class. The directory name is the class label, and the training script reads `.jpg` and `.jpeg` images:
+The training dataset uses one subdirectory per class. The directory name becomes the class label.
+
+Example:
 
 ```text
 resnet/dataset/
@@ -245,41 +582,44 @@ resnet/dataset/
     └── ...
 ```
 
-At least two non-empty classes are required, with at least two JPEG images in each class. More numerous and varied examples are strongly recommended.
+At least two non-empty classes are required, with at least two JPEG images in each class. Larger and more varied datasets are strongly recommended.
 
 Run training from `nanopi/` with the NanoPi virtual environment active:
 
 ```bash
-cd ~/NanoPi-M5-Video-Encoder/nanopi
-source .venv-resnet/bin/activate
 python train_classifier.py
 ```
 
-The default backend extracts features with the RK3576 NPU using the batch-4 RKNN model. You can select another installed batch variant with `--batch-size` or provide an explicit model with `--extractor`:
+The default feature-extraction backend uses the RK3576 NPU and the batch-4 RKNN model.
+
+Other installed batch variants can be selected explicitly:
 
 ```bash
 python train_classifier.py --batch-size 8
-python train_classifier.py --extractor ../resnet/models/resnet50v2_feature_extractor_rk3576_fp16_320x180_batch2.rknn
 ```
 
-As with `process_video.py`, an explicit `--extractor` takes precedence and its filename determines the batch size. A filename without `_batchN` means batch 1. `--use-cpu` selects TensorFlow/CPU feature extraction and ignores the RKNN extractor and batch selection; TensorFlow must be available in the environment.
+Or specify a particular feature-extractor model:
 
-The training pipeline keeps ResNet50V2 frozen and trains a separate multiclass Logistic Regression classifier on its 2048-dimensional feature vectors. `class_weight="balanced"` compensates for differences in the number of images per class. The 80/20 stratified split is used for preliminary evaluation only; the final classifier is fitted again using the complete dataset.
+```bash
+python train_classifier.py \
+  --extractor ../resnet/models/resnet50v2_feature_extractor_rk3576_fp16_320x180_batch2.rknn
+```
 
-The script writes:
+An explicit extractor path takes precedence and its filename determines the effective batch size.
 
-- Feature cache: `resnet/artifacts/resnet50v2_classifier_cache.npz`
-- Evaluation report: `resnet/artifacts/resnet50v2_classifier_training_report.txt`
-- Final classifier: `resnet/models/resnet50v2_logistic_classifier.npz`
-- Previous classifier backup: `resnet/models/resnet50v2_logistic_classifier.npz.bak`
+The ResNet50V2 feature extractor remains frozen. The training pipeline extracts 2048-dimensional feature vectors and trains a separate multiclass Logistic Regression classifier.
 
-The feature cache is keyed by backend and fixed RKNN batch variant. It also checks each image's relative path, file size, and modification time. Changing the RKNN batch size therefore causes the script to rebuild the feature cache for that variant rather than mixing features extracted by different variants.
+The trained classifier parameters are saved in:
 
-The evaluation split is random at image level. Related frames from the same recording may therefore appear in both the training and evaluation subsets, making the reported score optimistic. For a reliable estimate of generalization, evaluate on recordings that were not used to build the training dataset.
+```text
+resnet/models/resnet50v2_logistic_classifier.npz
+```
 
-## Updating the RKNN feature-extractor model from PC/WSL
+The classifier can then be used immediately by `process_video.py`.
 
-This optional workflow regenerates the frozen ResNet50V2 feature extractor and converts it for the RK3576. Run it from WSL Ubuntu on an x86-64 PC.
+## Optional PC / WSL model conversion workflow
+
+The `pc-wsl/` directory contains the tools required to export the ResNet50V2 feature extractor and convert it into an RKNN model for the RK3576 NPU. This workflow is not required for normal video processing when the required RKNN model is already available on the NanoPi. Run it from WSL Ubuntu on an x86-64 PC.
 
 1. Clone the repository:
 
@@ -363,38 +703,54 @@ The conversion environment uses RKNN Toolkit2 2.3.2 on the PC/WSL side. The Nano
 
 ## Windows integration
 
-The optional scripts in `windows/` can launch the NanoPi workflow from Windows when the source recordings are available through a mapped NAS drive.
+The `windows/` directory contains optional helpers for launching the NanoPi workflow directly from Windows.
 
-### Configure SSH aliases
+The integration uses:
 
-Run `windows/install-ssh-alias.bat` with six arguments:
+- Windows OpenSSH (`ssh.exe` and `scp.exe`).
+- SSH configuration aliases named `rkvenc-nanopi` and `rkvenc-nas`.
+- A mapped Windows network drive pointing to the same NAS storage mounted on the NanoPi.
+- The Windows batch launcher and its INI configuration file.
 
-```cmd
-install-ssh-alias.bat <nanopi_user> <nanopi_host_ip> <nanopi_key> <nas_user> <nas_host_ip> <nas_key>
+### SSH configuration
+
+The Windows scripts use the SSH aliases to acces the NanoPi and NAS. Configure this aliases in your Windows SSH configuration `%USERPROFILE%\.ssh\config`. The repository includes an SSH alias installation helper:
+
+```text
+windows/install-ssh-alias.bat
 ```
 
-Private-key filenames must be located in `%USERPROFILE%\.ssh\`. Use `-` for a key argument when no dedicated private key is required. The script installs the aliases `rkvenc-nanopi` and `rkvenc-nas`; an alias that already exists is left unchanged.
+Run it and follow its instructions. Copy your acces keys in `%USERPROFILE%\.ssh` folder, if you use one.
 
-### Launch processing from Windows
+### Configure the Windows launcher
 
-`windows/process-and-encode.bat` accepts one video path on the mapped `N:` drive:
+Copy the template `process-and-encode-template.ini` and rename it to `process-and-encode.ini`. Edit the copied file according to your preferences. The original template must remain unchanged. It documents the supported configuration keys and their expected formats.
 
-```cmd
-process-and-encode.bat "N:\WDRed2\TV Rec\News\recording.ts"
+The Windows launcher reads this local INI file and uploads it to `/dev/shm/process-and-encode.ini` on the NanoPi using SCP. The remote workflow then uses this temporary configuration instead of the local NanoPi configuration, and removes the uploaded file automatically when processing finishes.
+
+### Explorer context-menu integration
+
+Use the provided scripts in `windows/` folder to install and remove an Explorer context-menu entry for a selected video file extension.
+
+To install the context-menu entry:
+
+```bat
+add-menu-shortcut.bat ts /NAS
 ```
 
-The launcher maps `N:\...` to `/NAS/...` and runs `process-and-encode.sh` remotely through the `rkvenc-nanopi` SSH alias. The NAS path must also be mounted under `/NAS` on the NanoPi. The current BAT file contains the NanoPi checkout path `/home/marus/NanoPi-M5-Video-Encoder/nanopi`; edit that path if your repository is installed elsewhere.
+The extension and NAS mount point can also be entered interactively.
 
-### Add or remove an Explorer context-menu entry
+After installation, right-click a supported video file in Windows Explorer and select
+`Send to NanoPi Encoder...`. The script checks that the video is stored on a mapped network drive, translates the Windows path into its corresponding Linux NAS path, uploads the configuration to the NanoPi, and starts the remote processing workflow.
 
-Run the relevant script with a file extension, with or without the leading dot:
+To remove the entry:
 
-```cmd
-add-menu-shortcut.bat ts
+```bat
 remove-menu-shortcut.bat ts
 ```
 
-The context-menu command invokes `process-and-encode.bat` for the selected file.
+The Windows integration is optional. All processing and encoding operations can also be started directly from the NanoPi terminal.
+
 
 ## Utility scripts
 
@@ -414,10 +770,16 @@ For the complete list of command-line options, run the script with `--help` wher
 - Classification quality depends on the training examples and selected probability thresholds. Review borderline scenes, especially after changing the dataset or classifier.
 - The native MPP/RGA preprocessing path expects JPEG thumbnails with the dimensions required by the RKNN model. The feature extractor distributed for this project uses 320x180 input images.
 - Hardware acceleration depends on a compatible RK3576 kernel/driver/runtime stack and the custom FFmpeg build. The scripts cannot make an incompatible system image compatible by themselves.
-- Each normal processing run creates a new working directory. If it already exists and is non-empty, `process_video.py` refuses to overwrite it. The wrapper has its own cleanup behavior for incomplete directories; see the wrapper notes above.
 
 ## Marus Non-Commercial License v1.0
 
 This project is free for personal and hobby use only.  
 Commercial use requires a paid license from the author.  
-Third-party libraries keep their own licenses.
+
+Third-party libraries keep their own licenses:
+- FFmpeg and the Rockchip MPP/RGA stack for hardware video processing.
+- RKNN Runtime for NPU inference.
+- ResNet50V2 for image feature extraction.
+- Logistic Regression for multiclass classification.
+- Python and native C++ for the processing pipeline.
+- HEVC hardware encoding through Rockchip MPP.
